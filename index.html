@@ -1,0 +1,548 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=240, initial-scale=1, maximum-scale=1, user-scalable=no">
+<meta name="theme-color" content="#000000">
+<link rel="manifest" href="./manifest.json">
+<link rel="apple-touch-icon" href="./icon-192.png">
+<title>IPTV Lite</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  html, body {
+    width: 100%; height: 100%;
+    background: #000; color: #fff;
+    font-family: sans-serif;
+    font-size: 14px;
+    overflow: hidden;
+  }
+  #app { width: 100%; height: 100%; display: flex; flex-direction: column; position: relative; }
+  .screen { display: none; flex: 1; flex-direction: column; padding: 6px; overflow-y: auto; }
+  .screen.active { display: flex; }
+  h1 { font-size: 15px; margin-bottom: 6px; }
+  label { font-size: 12px; color: #aaa; margin-top: 4px; }
+  input {
+    width: 100%; font-size: 14px; padding: 4px;
+    background: #111; color: #fff; border: 1px solid #555;
+    margin-bottom: 4px;
+  }
+  .btn {
+    display: block; width: 100%; padding: 6px; margin-top: 8px;
+    background: #222; color: #fff; border: 1px solid #555;
+    text-align: center; font-size: 14px;
+  }
+  .btn.focused, li.focused { background: #2a6fd6; border-color: #2a6fd6; }
+  ul { list-style: none; flex: 1; overflow-y: auto; }
+  li {
+    padding: 6px 4px; border-bottom: 1px solid #222;
+    font-size: 13px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis;
+    display: flex; justify-content: space-between;
+  }
+  li .slot { color: #888; margin-right: 6px; }
+  li.empty { color: #555; font-style: italic; }
+  .status { font-size: 12px; color: #f55; margin-top: 4px; min-height: 14px; }
+  .hint { font-size: 10px; color: #666; margin-top: 6px; line-height: 1.3; }
+  video { width: 100%; height: 100%; background: #000; }
+  #playerScreen { padding: 0; position: relative; }
+  #playerOverlay {
+    position: absolute; top: 4px; left: 4px; right: 4px;
+    font-size: 11px; color: #fff; z-index: 10; pointer-events: none;
+  }
+  #playerOverlay span {
+    background: rgba(0,0,0,0.65); padding: 2px 6px; border-radius: 2px;
+    display: inline-block; margin-bottom: 2px;
+  }
+  #toast {
+    position: absolute; bottom: 8px; left: 4px; right: 4px;
+    background: rgba(20,20,30,0.92); border: 1px solid #2a6fd6;
+    color: #fff; font-size: 12px; padding: 6px; text-align: center;
+    border-radius: 3px; z-index: 20; display: none;
+  }
+</style>
+</head>
+<body>
+<div id="app">
+
+  <!-- LOGIN SCREEN -->
+  <div class="screen active" id="loginScreen">
+    <h1>IPTV Lite Login</h1>
+    <label>Server URL (e.g. http://server:port)</label>
+    <input id="serverInput" type="text" autocomplete="off">
+    <label>Username</label>
+    <input id="userInput" type="text" autocomplete="off">
+    <label>Password</label>
+    <input id="passInput" type="password" autocomplete="off">
+    <div class="btn focused" id="loginBtn" tabindex="0">Connect &amp; Remember Me</div>
+    <div class="status" id="loginStatus"></div>
+    <div class="hint">Login is saved on this device. You won't need to re-enter it next time you open the app.</div>
+  </div>
+
+  <!-- HOME / FAVORITES SCREEN -->
+  <div class="screen" id="homeScreen">
+    <h1>Favorites</h1>
+    <ul id="favList"></ul>
+    <div class="btn" id="browseBtn">Browse All Categories</div>
+    <div class="btn" id="logoutBtn">Log Out / Switch Account</div>
+    <div class="hint">Press 0-9 anywhere to jump to that favorite.<br>While watching, press a number to save the current channel to that slot.</div>
+  </div>
+
+  <!-- CATEGORY SCREEN -->
+  <div class="screen" id="catScreen">
+    <h1>Categories</h1>
+    <ul id="catList"></ul>
+    <div class="status" id="catStatus"></div>
+  </div>
+
+  <!-- CHANNEL SCREEN -->
+  <div class="screen" id="chanScreen">
+    <h1 id="chanTitle">Channels</h1>
+    <ul id="chanList"></ul>
+    <div class="status" id="chanStatus"></div>
+  </div>
+
+  <!-- PLAYER SCREEN -->
+  <div class="screen" id="playerScreen">
+    <div id="playerOverlay"><span id="nowPlaying"></span></div>
+    <video id="video" controls autoplay playsinline></video>
+    <div id="toast"></div>
+  </div>
+
+</div>
+
+<script>
+/* ---------- State ---------- */
+var state = {
+  server: '', user: '', pass: '',
+  categories: [], channels: [],
+  favorites: {},          // { "0": {stream_id, name}, "1": {...}, ... }
+  currentChannel: null
+};
+
+var STORAGE_LOGIN = 'iptvlite_login';
+var STORAGE_FAV = 'iptvlite_favorites';
+
+/* ---------- Persistence helpers ---------- */
+function loadLogin() {
+  try { return JSON.parse(localStorage.getItem(STORAGE_LOGIN) || 'null'); }
+  catch (e) { return null; }
+}
+function saveLogin() {
+  try {
+    localStorage.setItem(STORAGE_LOGIN, JSON.stringify({
+      server: state.server, user: state.user, pass: state.pass
+    }));
+  } catch (e) {}
+}
+function clearLogin() {
+  try { localStorage.removeItem(STORAGE_LOGIN); } catch (e) {}
+}
+function loadFavorites() {
+  try { state.favorites = JSON.parse(localStorage.getItem(STORAGE_FAV) || '{}'); }
+  catch (e) { state.favorites = {}; }
+}
+function saveFavorites() {
+  try { localStorage.setItem(STORAGE_FAV, JSON.stringify(state.favorites)); } catch (e) {}
+}
+
+/* ---------- Screen switching ---------- */
+function showScreen(id) {
+  var screens = document.querySelectorAll('.screen');
+  for (var i = 0; i < screens.length; i++) screens[i].classList.remove('active');
+  document.getElementById(id).classList.add('active');
+}
+
+/* ---------- Toast (brief on-screen feedback) ---------- */
+var toastTimer = null;
+function showToast(msg, ms) {
+  var t = document.getElementById('toast');
+  t.textContent = msg;
+  t.style.display = 'block';
+  clearTimeout(toastTimer);
+  toastTimer = setTimeout(function () { t.style.display = 'none'; }, ms || 1500);
+}
+
+/* ---------- Focus-list nav helper (Up/Down + Enter) ---------- */
+function FocusList(container, onSelect) {
+  this.container = container;
+  this.items = [];
+  this.index = 0;
+  this.onSelect = onSelect;
+}
+FocusList.prototype.setItems = function (items) {
+  this.items = items;
+  this.index = 0;
+  this.render();
+};
+FocusList.prototype.render = function () {
+  for (var i = 0; i < this.container.children.length; i++) {
+    this.container.children[i].classList.toggle('focused', i === this.index);
+  }
+};
+FocusList.prototype.move = function (dir) {
+  if (!this.items.length) return;
+  this.index = (this.index + dir + this.items.length) % this.items.length;
+  this.render();
+  var el = this.container.children[this.index];
+  if (el && el.scrollIntoView) el.scrollIntoView({ block: 'nearest' });
+};
+FocusList.prototype.select = function () {
+  if (this.items.length) this.onSelect(this.items[this.index], this.index);
+};
+
+var catFocus = null, chanFocus = null, favFocus = null, homeBtnFocus = 0; // 0=fav list,1=browse,2=logout
+
+/* ---------- API helpers ---------- */
+function apiUrl(action, extra) {
+  var u = state.server.replace(/\/$/, '') + '/player_api.php?username=' +
+    encodeURIComponent(state.user) + '&password=' + encodeURIComponent(state.pass);
+  if (action) u += '&action=' + action;
+  if (extra) u += extra;
+  return u;
+}
+
+function fetchJson(url, cb, errCb) {
+  var xhr = new XMLHttpRequest();
+  xhr.open('GET', url, true);
+  xhr.timeout = 15000;
+  xhr.onload = function () {
+    if (xhr.status >= 200 && xhr.status < 300) {
+      try { cb(JSON.parse(xhr.responseText)); }
+      catch (e) { errCb('Bad response from server'); }
+    } else {
+      errCb('Server error: ' + xhr.status);
+    }
+  };
+  xhr.onerror = function () { errCb('Network error - check server URL / WiFi'); };
+  xhr.ontimeout = function () { errCb('Connection timed out'); };
+  xhr.send();
+}
+
+/* ---------- Login ---------- */
+function attemptLogin(server, user, pass, onSuccess, onFail) {
+  state.server = server; state.user = user; state.pass = pass;
+  fetchJson(apiUrl(null), function (data) {
+    if (data && data.user_info && data.user_info.auth === 1) {
+      onSuccess();
+    } else {
+      onFail('Login failed - check credentials');
+    }
+  }, onFail);
+}
+
+function doLoginFromForm() {
+  var server = document.getElementById('serverInput').value.trim();
+  var user = document.getElementById('userInput').value.trim();
+  var pass = document.getElementById('passInput').value.trim();
+  var statusEl = document.getElementById('loginStatus');
+
+  if (!server || !user || !pass) {
+    statusEl.textContent = 'Please fill in all fields';
+    return;
+  }
+  if (!/^https?:\/\//i.test(server)) server = 'http://' + server;
+
+  statusEl.textContent = 'Connecting...';
+  attemptLogin(server, user, pass, function () {
+    saveLogin();
+    statusEl.textContent = '';
+    goHome();
+  }, function (msg) {
+    statusEl.textContent = msg;
+  });
+}
+
+function tryAutoLogin() {
+  var saved = loadLogin();
+  if (!saved || !saved.server || !saved.user || !saved.pass) {
+    showScreen('loginScreen');
+    document.getElementById('loginBtn').focus();
+    return;
+  }
+  document.getElementById('serverInput').value = saved.server;
+  document.getElementById('userInput').value = saved.user;
+  document.getElementById('passInput').value = saved.pass;
+  document.getElementById('loginStatus').textContent = 'Signing in...';
+  attemptLogin(saved.server, saved.user, saved.pass, function () {
+    goHome();
+  }, function (msg) {
+    // saved credentials no longer work - fall back to manual login
+    document.getElementById('loginStatus').textContent = msg + ' (please re-enter)';
+    showScreen('loginScreen');
+  });
+}
+
+function logout() {
+  clearLogin();
+  state.server = state.user = state.pass = '';
+  document.getElementById('serverInput').value = '';
+  document.getElementById('userInput').value = '';
+  document.getElementById('passInput').value = '';
+  document.getElementById('loginStatus').textContent = '';
+  showScreen('loginScreen');
+  document.getElementById('loginBtn').focus();
+}
+
+/* ---------- Home / Favorites ---------- */
+function goHome() {
+  renderFavorites();
+  homeBtnFocus = 0;
+  showScreen('homeScreen');
+  updateHomeFocusVisual();
+}
+
+function renderFavorites() {
+  var ul = document.getElementById('favList');
+  ul.innerHTML = '';
+  var slots = ['1','2','3','4','5','6','7','8','9','0'];
+  slots.forEach(function (slot) {
+    var fav = state.favorites[slot];
+    var li = document.createElement('li');
+    if (fav) {
+      li.innerHTML = '<span><span class="slot">' + slot + '</span>' + escapeHtml(fav.name) + '</span>';
+    } else {
+      li.className = 'empty';
+      li.innerHTML = '<span><span class="slot">' + slot + '</span>(empty - watch a channel, then press ' + slot + ' to save it here)</span>';
+    }
+    li.dataset.slot = slot;
+    ul.appendChild(li);
+  });
+  favFocus = new FocusList(ul, function (item, idx) {
+    var slot = slots[idx];
+    playFavoriteSlot(slot);
+  });
+  favFocus.setItems(slots);
+}
+
+function escapeHtml(s) {
+  return String(s).replace(/[&<>"']/g, function (c) {
+    return ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'})[c];
+  });
+}
+
+function playFavoriteSlot(slot) {
+  var fav = state.favorites[slot];
+  if (!fav) { showToast('Slot ' + slot + ' is empty'); return; }
+  playChannel(fav);
+}
+
+function updateHomeFocusVisual() {
+  document.getElementById('browseBtn').classList.toggle('focused', homeBtnFocus === 1);
+  document.getElementById('logoutBtn').classList.toggle('focused', homeBtnFocus === 2);
+  if (homeBtnFocus !== 0 && favFocus) favFocus.render.call({ container: document.getElementById('favList') }); // no-op safe
+}
+
+/* ---------- Categories ---------- */
+function loadCategories() {
+  document.getElementById('catStatus').textContent = 'Loading...';
+  showScreen('catScreen');
+  fetchJson(apiUrl('get_live_categories'), function (data) {
+    state.categories = data || [];
+    document.getElementById('catStatus').textContent = '';
+    renderCategories();
+  }, function (msg) {
+    document.getElementById('catStatus').textContent = msg;
+  });
+}
+
+function renderCategories() {
+  var ul = document.getElementById('catList');
+  ul.innerHTML = '';
+  state.categories.forEach(function (cat) {
+    var li = document.createElement('li');
+    li.textContent = cat.category_name;
+    ul.appendChild(li);
+  });
+  catFocus = new FocusList(ul, function (cat) {
+    loadChannels(cat);
+  });
+  catFocus.setItems(state.categories);
+}
+
+/* ---------- Channels ---------- */
+function loadChannels(cat) {
+  document.getElementById('chanTitle').textContent = cat.category_name;
+  document.getElementById('chanStatus').textContent = 'Loading...';
+  showScreen('chanScreen');
+  fetchJson(apiUrl('get_live_streams', '&category_id=' + encodeURIComponent(cat.category_id)), function (data) {
+    state.channels = data || [];
+    document.getElementById('chanStatus').textContent = '';
+    renderChannels();
+  }, function (msg) {
+    document.getElementById('chanStatus').textContent = msg;
+  });
+}
+
+function renderChannels() {
+  var ul = document.getElementById('chanList');
+  ul.innerHTML = '';
+  state.channels.forEach(function (ch) {
+    var li = document.createElement('li');
+    li.textContent = ch.name;
+    ul.appendChild(li);
+  });
+  chanFocus = new FocusList(ul, function (ch) {
+    playChannel(ch);
+  });
+  chanFocus.setItems(state.channels);
+}
+
+/* ---------- Player ---------- */
+function streamUrl(ch) {
+  return state.server.replace(/\/$/, '') + '/live/' +
+    encodeURIComponent(state.user) + '/' + encodeURIComponent(state.pass) + '/' +
+    ch.stream_id + '.m3u8';
+}
+
+function playChannel(ch) {
+  state.currentChannel = { stream_id: ch.stream_id, name: ch.name };
+  var video = document.getElementById('video');
+  video.src = streamUrl(ch);
+  document.getElementById('nowPlaying').textContent = ch.name;
+  showScreen('playerScreen');
+  video.play().catch(function () {});
+}
+
+function stopPlayer() {
+  var video = document.getElementById('video');
+  video.pause();
+  video.removeAttribute('src');
+  video.load();
+  state.currentChannel = null;
+  showScreen('chanScreen');
+}
+
+function saveCurrentAsFavorite(slot) {
+  if (!state.currentChannel) return;
+  state.favorites[slot] = { stream_id: state.currentChannel.stream_id, name: state.currentChannel.name };
+  saveFavorites();
+  showToast('Saved "' + state.currentChannel.name + '" to favorite ' + slot);
+}
+
+/* ---------- Volume control ---------- */
+function adjustVolume(delta) {
+  var video = document.getElementById('video');
+  var v = Math.min(1, Math.max(0, video.volume + delta));
+  video.volume = v;
+  video.muted = false;
+  showToast('Volume: ' + Math.round(v * 100) + '%', 1000);
+}
+
+/* ---------- Keyboard / keypad navigation ---------- */
+/* D-pad: ArrowUp/Down move focus, ArrowLeft = back, ArrowRight/Enter = select.
+   Digits 0-9: jump to favorite from any non-player screen; while playing,
+   save current channel to that slot.
+   '*' = volume down, '#' = volume up. */
+document.addEventListener('keydown', function (e) {
+  var key = e.key;
+  var activeId = document.querySelector('.screen.active').id;
+
+  // Global favorite-jump / volume / digit handling
+  if (/^[0-9]$/.test(key)) {
+    if (activeId === 'playerScreen') {
+      saveCurrentAsFavorite(key);
+    } else if (activeId !== 'loginScreen') {
+      playFavoriteSlot(key);
+    }
+    e.preventDefault();
+    return;
+  }
+  if (key === '*' ) { if (activeId === 'playerScreen') { adjustVolume(-0.1); e.preventDefault(); return; } }
+  if (key === '#' ) { if (activeId === 'playerScreen') { adjustVolume(0.1); e.preventDefault(); return; } }
+
+  if (activeId === 'playerScreen') {
+    if (key === 'ArrowLeft' || key === 'Backspace' || key === 'SoftLeft') {
+      stopPlayer();
+      e.preventDefault();
+    }
+    return;
+  }
+
+  if (activeId === 'loginScreen') {
+    if (key === 'Enter' && document.activeElement.id === 'loginBtn') {
+      doLoginFromForm();
+      e.preventDefault();
+    }
+    return;
+  }
+
+  if (activeId === 'homeScreen') {
+    if (key === 'ArrowDown') {
+      if (homeBtnFocus === 0 && favFocus && favFocus.index < favFocus.items.length - 1) {
+        favFocus.move(1);
+      } else {
+        homeBtnFocus = Math.min(2, homeBtnFocus + 1);
+        updateHomeFocusVisual();
+      }
+      e.preventDefault();
+    } else if (key === 'ArrowUp') {
+      if (homeBtnFocus === 0 && favFocus) {
+        favFocus.move(-1);
+      } else {
+        homeBtnFocus = Math.max(0, homeBtnFocus - 1);
+        updateHomeFocusVisual();
+        if (homeBtnFocus === 0) favFocus.render();
+      }
+      e.preventDefault();
+    } else if (key === 'Enter' || key === 'ArrowRight') {
+      if (homeBtnFocus === 0) favFocus.select();
+      else if (homeBtnFocus === 1) loadCategories();
+      else if (homeBtnFocus === 2) logout();
+      e.preventDefault();
+    }
+    return;
+  }
+
+  if (activeId === 'catScreen' && catFocus) {
+    if (key === 'ArrowDown') { catFocus.move(1); e.preventDefault(); }
+    else if (key === 'ArrowUp') { catFocus.move(-1); e.preventDefault(); }
+    else if (key === 'Enter' || key === 'ArrowRight') { catFocus.select(); e.preventDefault(); }
+    else if (key === 'ArrowLeft' || key === 'Backspace') { goHome(); e.preventDefault(); }
+    return;
+  }
+
+  if (activeId === 'chanScreen' && chanFocus) {
+    if (key === 'ArrowDown') { chanFocus.move(1); e.preventDefault(); }
+    else if (key === 'ArrowUp') { chanFocus.move(-1); e.preventDefault(); }
+    else if (key === 'Enter' || key === 'ArrowRight') { chanFocus.select(); e.preventDefault(); }
+    else if (key === 'ArrowLeft' || key === 'Backspace') { showScreen('catScreen'); e.preventDefault(); }
+    return;
+  }
+});
+
+/* Mouse/touch tap fallback */
+document.getElementById('loginBtn').addEventListener('click', doLoginFromForm);
+document.getElementById('browseBtn').addEventListener('click', loadCategories);
+document.getElementById('logoutBtn').addEventListener('click', logout);
+document.getElementById('favList').addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (!li) return;
+  playFavoriteSlot(li.dataset.slot);
+});
+document.getElementById('catList').addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (!li || !catFocus) return;
+  var idx = Array.prototype.indexOf.call(li.parentNode.children, li);
+  catFocus.index = idx;
+  catFocus.select();
+});
+document.getElementById('chanList').addEventListener('click', function (e) {
+  var li = e.target.closest('li');
+  if (!li || !chanFocus) return;
+  var idx = Array.prototype.indexOf.call(li.parentNode.children, li);
+  chanFocus.index = idx;
+  chanFocus.select();
+});
+
+/* ---------- Init ---------- */
+loadFavorites();
+tryAutoLogin();
+
+/* ---------- PWA service worker registration ---------- */
+if ('serviceWorker' in navigator) {
+  window.addEventListener('load', function () {
+    navigator.serviceWorker.register('./sw.js').catch(function () {});
+  });
+}
+</script>
+</body>
+</html>
